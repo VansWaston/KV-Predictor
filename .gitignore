@@ -1,1 +1,14 @@
-/app.log
+# ignore files
+*.log
+*.md
+*.pyc
+
+# ignore directories
+*_examples
+results
+LMCache
+CacheBlend
+__pycache__
+
+# unignore files
+!README.md

@@ -8,16 +8,16 @@ from typing import List, Tuple, Optional, Union
 import logging
 from logging.handlers import RotatingFileHandler
 
-handler = RotatingFileHandler('app.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        # handler,  # output to file
-        logging.StreamHandler()  # output to console
-    ]
-)
-
+if __name__ == "__main__":
+    handler = RotatingFileHandler('./log/datasets.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            # handler,  # output to file
+            logging.StreamHandler()  # output to console
+        ]
+    )
 
 class datasets():
     def __init__(
@@ -94,7 +94,18 @@ def batching(
     batch_size: int,
     shuffle: bool = False,
     seed: int = None,
-):
+) -> List:
+    """
+    Batch dataset into limit batch_size
+    Args:
+        dataset (Union[List,Tuple]): dataset to be batched
+        batch_size (int): required batch size
+        shuffle (bool, optional): whether to shuffle, not if defaulted. Defaults to False.
+        seed (int, optional): random seed. Defaults to None.
+
+    Returns:
+        List: dataset batched into limit batch_size
+    """
     if shuffle:
         if seed is not None:
             random.seed(seed)

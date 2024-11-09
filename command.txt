@@ -1,1 +1,13 @@
-docker run --runtime nvidia --gpus all --name cuzihao -d -v ~/.cache/huggingface:/root/.cache/huggingface -v /home/zihao/projests/KVPrediction:/workspace -v /home/zihao/datasets:/datasets --ipc=host docker.zhai.cm/pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
+# docker
+docker run --runtime nvidia --gpus all --name cuzihao -itd -p 8080:80 -v ~/.cache/huggingface:/root/.cache/huggingface -v /home/zihao/projests/KVPrediction:/workspace -v /home/zihao/datasets:/datasets --ipc=host docker.zhai.cm/pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
+
+# huggingface cli
+# model
+# huggingface-cli download meta-llama/Llama-2-13b-chat-hf config.json model-00001-of-00003.safetensors --include ["*.safetensors","*.json"] --local-dir /models/meta-llama/Llama-2-13b-chat-hf --local-dir-use-symlinks False --max-workers 16
+huggingface-cli download meta-llama/Llama-3.2-3B --include ["*.safetensors","*.json"] --max-workers 16
+meta-llama/Llama-3.2-1B
+
+# dataset
+huggingface-cli download --repo-type dataset --resume-download wikitext --local-dir wikitext --local-dir-use-symlinks False
+
+

@@ -120,6 +120,31 @@ def batching(
             batched.append(dataset[i:])
     return batched
 
+def load_dataset(file_path, return_type="Dict"):
+    '''
+    read json file and return a {return_type}-typed object.  
+    example:
+    >>> dataset=load_dataset("path/to/dataset.json")    # DataFrame
+
+    >>> dataset=dataset.to_dict(orient='records')
+    >>> print(dataset[:5])
+    '''
+    if file_path.startswith("/"):
+        file_path = file_path[1:]
+    # Load the dataset.
+    try:
+        dataset = pd.read_json(f"file://localhost/{file_path}", lines=True)
+    except ValueError as e:
+        print(f"Error loading JSON: {e}")
+        return None
+    # Return the dataset.
+    if return_type == "Dict":
+        return dataset.to_dict(orient='records')
+    elif return_type == "DataFrame":
+        return dataset
+    else:
+        raise ValueError(f"Invalid return type: {return_type}, [Dict, DataFrame] supported.")
+
 if __name__ == "__main__":
     folder = 'rc.nocontext'
     dir = f'/home/zihao/datasets/mandarjoshi/trivia_qa'

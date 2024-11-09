@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from transformers import AutoTokenizer
 from typing import List, Dict, Any, Optional
-from datasets import batching
+from packges.MyDatasets import batching
 from vllm.model_executor.models.llama import LlamaAttention
 from transformers import LlamaConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -11,31 +11,8 @@ from vllm.config import CacheConfig
 import torch
 from vllm.attention import Attention, AttentionMetadata
 import argparse
-
-def load_dataset(file_path, return_type="Dict"):
-    '''
-    read json file and return a {return_type}-typed object.  
-    example:
-    >>> dataset=load_dataset("path/to/dataset.json")    # DataFrame
-
-    >>> dataset=dataset.to_dict(orient='records')
-    >>> print(dataset[:5])
-    '''
-    if file_path.startswith("/"):
-        file_path = file_path[1:]
-    # Load the dataset.
-    try:
-        dataset = pd.read_json(f"file://localhost/{file_path}", lines=True)
-    except ValueError as e:
-        print(f"Error loading JSON: {e}")
-        return None
-    # Return the dataset.
-    if return_type == "Dict":
-        return dataset.to_dict(orient='records')
-    elif return_type == "DataFrame":
-        return dataset
-    else:
-        raise ValueError(f"Invalid return type: {return_type}, [Dict, DataFrame] supported.")
+import trace
+from packges.MyDatasets import load_dataset
 
 class KVCached_LlamaAttn(LlamaAttention):
     def __init__(
@@ -152,13 +129,13 @@ def parsing_args():
     parser.add_argument(
         "--dataset",
         type=str,
-        default="/home/zihao/datasets/mandarjoshi/trivia_qa/rc.nocontext/rc_nocontext_validation.json",
+        default="/datasets/mandarjoshi/trivia_qa/rc.nocontext/rc_nocontext_validation.json",
         help="Path to dataset",
     )
     parser.add_argument(
         "--aux_model",
         type=str,
-        default="meta-llama/Llama-2-7b-hf",
+        default="meta-llama/Llama-3.1-8B-Instruct",
         help="Path to auxiliary model",
     )
     # parser.add_argument(
@@ -218,4 +195,14 @@ def parsing_args():
 
 if __name__ == "__main__":
     args = parsing_args()
-    main(args=args)
+    
+    tracer = trace.Trace(
+        # ignoredirs=[sys.prefix, sys.exec_prefix],
+        trace=0,
+        count=1,
+    )
+    
+    tracer.run("main(args)")
+    
+    r = tracer.results()
+    r.write_results(show_missing=True, coverdir=".")

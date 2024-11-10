@@ -9,10 +9,14 @@ import numpy as np
 import torch
 import pandas as pd
 import json
+
+from packges.utils import get_model_weights, get_Pseudoinverse, permute_kv, Timers
+
 # COSTANTS
 SURPORTED_LOSS_FUNC = ["fro", "nuclear", "svd"] # "mse", "mae", "cos", "kl", 
 
-handler = RotatingFileHandler(f'/workspace/log/hf/hf_examples.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
+now = datetime.now().strftime("%Y%m%d%H%M%S")
+handler = RotatingFileHandler(f'/workspace/log/hf/hf_examples_{now}.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -22,66 +26,6 @@ logging.basicConfig(
     ]
 )
 
-def timer(func):
-    def wrapper(*args, **kwargs):
-        start = time()
-        result = func(*args, **kwargs)
-        end = time()
-        logging.info(f"{func.__name__} took {end-start} seconds to run.")
-        return result
-    return wrapper
-
-def get_model_weights(
-    model: AutoModelForCausalLM,
-    weights_dict: list[str],
-    transpose: bool = True,
-):
-    model_weights = model.state_dict()
-    res = {}
-    for attr in weights_dict:
-        res[attr] = [model_weights[name].T for name in model_weights.keys() if attr in name] if transpose else [model_weights[name] for name in model_weights.keys() if attr in name]
-    
-    return res
-
-@timer
-def get_Pseudoinverse(
-    matries: list[Union[np.ndarray, torch.Tensor]],
-    device: str = None,
-):
-    if device is None:
-        device = matries[0].device
-    
-    if isinstance(matries[0], np.ndarray):
-        matries = [torch.tensor(matrix, device=device) for matrix in matries]
-    elif isinstance(matries[0], torch.Tensor):
-        matries = [matrix.to(device) for matrix in matries]
-        
-    assert all([matrix.device == device for matrix in matries]), f"matries are not in the same device : device : {device} , matries : {matries[0].device}"
-    
-    res = []
-    for matrix in matries:
-        res.append(torch.pinverse(matrix))
-    
-    return res
-
-def permute_kv(
-    kvs,
-):
-    """
-    transpose the key and value matrices to [batch_size, num_tokens, num_heads * head_dim]
-    """
-    num_layers = len(kvs)
-    bsz, num_heads, num_tokens, head_dim = kvs[0][0].shape
-    
-    res = ()
-    for i in range(num_layers):
-        layer_kv_list = list(kvs[i])
-        layer_kv_list[0] = layer_kv_list[0].permute(0, 2, 1, 3).reshape(bsz, num_tokens, -1)
-        layer_kv_list[1] = layer_kv_list[1].permute(0, 2, 1, 3).reshape(bsz, num_tokens, -1)
-        res += (tuple(layer_kv_list),)
-    
-    # logging.debug(f"permuted_kv.shape : {res[0][0].shape}")
-    return res
 
 def loss_fn(
     pred_kv,
@@ -155,39 +99,6 @@ class KV_Pred_losses:
                 avg_loss[func][1].append(self.losses[func][1][i] / self.num_layers)
         return avg_loss
 
-class Timer:
-    def __init__(
-        self,
-        name: str,
-    ):
-        self.name = name
-        self.time = []
-        self.start_time = 0
-    
-    def reset(
-        self,
-    ):
-        self.time = []
-        self.start_time = 0
-    
-    def start(
-        self,
-    ):
-        self.start_time = time()
-    
-    def end(
-        self,
-    ):
-        self.time.append(time() - self.start_time)
-        
-    def get_time(
-        self,
-        mode: str = "avg",
-    ):
-        if mode == "sum":
-            return sum(self.time)
-        return sum(self.time) / len(self.time)
-
 def main(
     args: Union[None, Optional[dict]] = None
 ):
@@ -229,7 +140,8 @@ def main(
     base_layers = len(base_weights["k_proj"])
     
     losses = KV_Pred_losses(aux_layers, args["loss_func"])
-    timer = Timer("request")
+    timer = Timers("request")
+    timer.create_timer()
     
     assert aux_layers == base_layers, "aux and base model's layers are not the same"
     
@@ -257,12 +169,12 @@ def main(
         
         aux_kv = aux_output.past_key_values
         base_kv = base_output.past_key_values
-
+        
         aux_kv = permute_kv(aux_kv)
         base_kv = permute_kv(base_kv)
         
-        logging.debug(f"aux_kv : {aux_kv[0][0].shape}")     # [batch_size, num_heads, num_tokens, head_dim]
-        logging.debug(f"base_kv : {base_kv[0][0].shape}")   # to [batch_size, num_tokens, num_heads * head_dim]
+        logging.debug(f"aux_kv shape: {aux_kv[0][0].shape}")     # [batch_size, num_heads, num_tokens, head_dim]
+        logging.debug(f"base_kv shape: {base_kv[0][0].shape}")   # to [batch_size, num_tokens, num_heads * head_dim]
         
         pred_kv = []
         

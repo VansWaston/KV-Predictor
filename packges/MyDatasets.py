@@ -7,9 +7,10 @@ import numpy as np
 from typing import List, Tuple, Optional, Union
 import logging
 from logging.handlers import RotatingFileHandler
+from torch.utils.data import Dataset, DataLoader
 
 if __name__ == "__main__":
-    handler = RotatingFileHandler('./log/datasets.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
+    handler = RotatingFileHandler('/workspace/log/utils/datasets.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
     logging.basicConfig(
         level=logging.DEBUG,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,6 +19,71 @@ if __name__ == "__main__":
             logging.StreamHandler()  # output to console
         ]
     )
+
+# load dataset via torch.utils.data.Dataset
+class loading_dataset(Dataset):
+    def __init__(self, data_file, max_dataset_size :int = None, use_prompt : bool = False):
+        self.max_dataset_size = max_dataset_size
+        self.data = self.load_data(data_file, use_prompt=use_prompt)
+        logging.info(f"Loaded {len(self.data) if self.max_dataset_size is None else self.max_dataset_size} data from {data_file},with {len(self.data)} records in total")
+    
+    # HACK(zihao): load data with needed format
+    def load_data(
+        self, 
+        data_file, 
+        query_prompt = f"Answer the question directly within 5 words. Do NOT repeat the question or output any other words. Question:\n",
+        use_prompt : bool = False,
+    ):
+        Data = {}
+        raw_data = self.load_raw_dataset(data_file, return_type="Dict")
+        # adjust the format of the data
+        if self.max_dataset_size is not None:
+            for idx, record in enumerate(raw_data):
+                if idx >= self.max_dataset_size:
+                    break
+                Data[idx] = {
+                        'question': (query_prompt if use_prompt else "") + record["question"],
+                        'answer': record["answer"]["value"],
+                    }
+        else:
+            for idx, record in enumerate(raw_data):
+                Data[idx] = {
+                        'question': (query_prompt if use_prompt else "") + record["question"],
+                        'answer': record["answer"]["normalized_value"],
+                    }
+        
+        return Data
+    
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+    
+    def load_raw_dataset(self, file_path, return_type="Dict"):
+        '''
+        read json file and return a {return_type}-typed object.  
+        example:
+        >>> dataset=load_dataset("path/to/dataset.json")    # DataFrame
+
+        >>> dataset=dataset.to_dict(orient='records')
+        >>> print(dataset[:5])
+        '''
+        if file_path.startswith("/"):
+            file_path = file_path[1:]
+        # Load the dataset.
+        try:
+            dataset = pd.read_json(f"file://localhost/{file_path}", lines=True)
+        except ValueError as e:
+            print(f"Error loading JSON: {e}")
+            return None
+        # Return the dataset.
+        if return_type == "Dict":
+            return dataset.to_dict(orient='records')
+        elif return_type == "DataFrame":
+            return dataset
+        else:
+            raise ValueError(f"Invalid return type: {return_type}, [Dict, DataFrame] supported.")
 
 class datasets():
     def __init__(
@@ -88,7 +154,8 @@ class datasets():
             logging.warning("No columns specified, deleting all data")
             self.data = pd.DataFrame()
         logging.info(f"Deleted data of {len(columns)} columns")
-    
+
+# decapricated: use collect_fn instead
 def batching(
     dataset: Union[List,Tuple],
     batch_size: int,
@@ -120,42 +187,36 @@ def batching(
             batched.append(dataset[i:])
     return batched
 
-def load_dataset(file_path, return_type="Dict"):
-    '''
-    read json file and return a {return_type}-typed object.  
-    example:
-    >>> dataset=load_dataset("path/to/dataset.json")    # DataFrame
+# HACK(zihao): collect_fn for DataLoader, to be used in DataLoader(collate_fn=collect_fn), *placed in main.py preferably*
+def collote_fn(batch_samples):
+    batch_inputs, batch_targets = [], []
+    batched_data = {}
+    for sample in batch_samples:
+        batch_inputs.append(sample['question'])
+        batch_targets.append(sample['answer'])
+    batched_data['question'] = batch_inputs
+    batched_data['answer'] = batch_targets
+    return batched_data
 
-    >>> dataset=dataset.to_dict(orient='records')
-    >>> print(dataset[:5])
-    '''
-    if file_path.startswith("/"):
-        file_path = file_path[1:]
-    # Load the dataset.
-    try:
-        dataset = pd.read_json(f"file://localhost/{file_path}", lines=True)
-    except ValueError as e:
-        print(f"Error loading JSON: {e}")
-        return None
-    # Return the dataset.
-    if return_type == "Dict":
-        return dataset.to_dict(orient='records')
-    elif return_type == "DataFrame":
-        return dataset
-    else:
-        raise ValueError(f"Invalid return type: {return_type}, [Dict, DataFrame] supported.")
 
 if __name__ == "__main__":
-    folder = 'rc.nocontext'
-    dir = f'/home/zihao/datasets/mandarjoshi/trivia_qa'
-    file_type = 'parquet'
-    mode = 'validation'
-    save_dir = dir
+    data = loading_dataset("/datasets/mandarjoshi/trivia_qa/rc.nocontext/rc_nocontext_validation.json")
+    valid_dataloader = DataLoader(data, batch_size=16, shuffle=False, collate_fn=collote_fn)
+    batch = next(iter(valid_dataloader))
+    logging.debug(f"batch.keys : {batch.keys()}")
+    logging.debug(f"batch : {batch}")
+
+# if __name__ == "__main__":
+#     folder = 'rc.nocontext'
+#     dir = f'/datasets/mandarjoshi/trivia_qa'
+#     file_type = 'parquet'
+#     mode = 'validation'
+#     save_dir = dir
     
-    data = datasets(f"{dir}/{folder}", file_type, save_dir=save_dir, mode=mode)
+#     data = datasets(f"{dir}/{folder}", file_type, save_dir=save_dir, mode=mode)
     
-    data.delete(columns=['question_id','question_source','entity_pages','search_results'])
+#     data.delete(columns=['question_id','question_source','entity_pages','search_results'])
     
-    print(data.data.head())
-    data.save_json(f"{dir}/{folder}/{folder.replace('.','_')}_{mode}.json", lines=True, indent=0)
-    # batched = batching(np.array(data.data).tolist(), 3, shuffle=True, seed=42)
+#     print(data.data.head())
+#     data.save_json(f"{dir}/{folder}/{folder.replace('.','_')}_{mode}.json", lines=True, indent=0)
+#     # batched = batching(np.array(data.data).tolist(), 3, shuffle=True, seed=42)

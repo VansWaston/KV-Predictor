@@ -1,11 +1,12 @@
 from transformers import AutoModelForCausalLM
 
-from decorators import timer
+from packges.decorators import timer
 
 from typing import Union, Optional
 import torch
 import numpy as np
 from time import time
+import logging
 
 def get_model_weights(
     model: AutoModelForCausalLM,
@@ -35,9 +36,20 @@ def get_Pseudoinverse(
     assert all([matrix.device == device for matrix in matries]), f"matries are not in the same device : device : {device} , matries : {matries[0].device}"
     
     res = []
-    for matrix in matries:
-        res.append(torch.pinverse(matrix))
-    
+    for idx, matrix in enumerate(matries):
+        # justify the matrix is invertible
+        if matrix.shape[0] != matrix.shape[1]:
+            logging.debug(f"matrix is not invertible : {matrix.shape}")
+        elif torch.det(matrix) == 0:
+            logging.debug(f"matrix is not invertible : torch.det(matrix) == 0")
+        else:
+            logging.debug(f"matrix is invertible {idx}/{len(matries)}")
+            
+        pinv = torch.pinverse(matrix)
+        # torch.linalg.pinv
+        logging.debug(f"pinv similarity : {torch.dist(torch.eye(pinv.shape[0]), pinv @ matrix)}")
+        res.append(pinv)
+
     return res
 
 def permute_kv(
@@ -58,6 +70,49 @@ def permute_kv(
     
     # logging.debug(f"permuted_kv.shape : {res[0][0].shape}")
     return res
+
+# TODO(zihao): align the input_ids and attention_mask more properly(simply drop the prefix now,Begining of the Sentence included, maybe hurt the performance)
+# consider to pad the shorter one with the eos_token_id
+def align_requests(
+    aux_request,
+    base_request,
+    aux_tokenizer,
+    base_tokenizer,
+    aux_device,
+    base_device,
+    use_pad = False,
+):
+    if not (aux_device == base_device):
+        aux_request["input_ids"] = aux_request["input_ids"].cpu()
+        aux_request["attention_mask"] = aux_request["attention_mask"].cpu()
+        base_request["input_ids"] = base_request["input_ids"].cpu()
+        base_request["attention_mask"] = base_request["attention_mask"].cpu()
+    
+    if aux_request['input_ids'].shape[1] < base_request['input_ids'].shape[1]:
+        if use_pad:
+            pad_id = torch.tensor([[aux_tokenizer.bos_token_id] * (base_request['input_ids'].shape[1] - aux_request['input_ids'].shape[1])] * aux_request['input_ids'].shape[0])
+            aux_request["input_ids"] = torch.cat([pad_id, aux_request["input_ids"]], dim=-1)
+            aux_request["attention_mask"] = torch.cat([torch.ones_like(pad_id), aux_request["attention_mask"]], dim=-1)
+        else:
+            prefix_drop = base_request['input_ids'].shape[1] - aux_request['input_ids'].shape[1]
+            base_request['input_ids'] = base_request['input_ids'][:, :-prefix_drop]
+            base_request['attention_mask'] = base_request['attention_mask'][:, :-prefix_drop]
+    elif aux_request['input_ids'].shape[1] > base_request['input_ids'].shape[1]:
+        if use_pad:
+            pad_id = torch.tensor([[base_tokenizer.bos_token_id] * (aux_request['input_ids'].shape[1] - base_request['input_ids'].shape[1])] * base_request['input_ids'].shape[0])
+            base_request["input_ids"] = torch.cat([pad_id, base_request["input_ids"]], dim=-1)
+            base_request["attention_mask"] = torch.cat([torch.ones_like(pad_id), base_request["attention_mask"]], dim=-1)
+        else:
+            prefix_drop = aux_request['input_ids'].shape[1] - base_request['input_ids'].shape[1]
+            aux_request['input_ids'] = aux_request['input_ids'][:, :-prefix_drop]
+            aux_request['attention_mask'] = aux_request['attention_mask'][:, :-prefix_drop]
+    
+    if not (aux_device == base_device):
+        aux_request["input_ids"] = aux_request["input_ids"].to(aux_device)
+        aux_request["attention_mask"] = aux_request["attention_mask"].to(aux_device)
+        base_request["input_ids"] = base_request["input_ids"].to(base_device)
+        base_request["attention_mask"] = base_request["attention_mask"].to(base_device)
+    return aux_request, base_request
 
 class Timers:
     """

@@ -4,19 +4,18 @@ from datetime import datetime
 import logging
 from logging.handlers import RotatingFileHandler
 from typing import Union, Optional
-from packges.MyDatasets import load_dataset, batching
+from packges.MyDatasets import loading_dataset, collote_fn
 import numpy as np
 import torch
 import pandas as pd
 import json
-
-from packges.utils import get_model_weights, get_Pseudoinverse, permute_kv, Timers
-
-# COSTANTS
-SURPORTED_LOSS_FUNC = ["fro", "nuclear", "svd"] # "mse", "mae", "cos", "kl", 
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+from packges.utils import get_model_weights, get_Pseudoinverse, permute_kv, Timers, align_requests
+from packges.losses import KV_Pred_losses, SURPORTED_LOSS_FUNC, loss_fn
 
 now = datetime.now().strftime("%Y%m%d%H%M%S")
-handler = RotatingFileHandler(f'/workspace/log/hf/hf_examples_{now}.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
+handler = RotatingFileHandler(f'/workspace/log/examples/PI_examples_{now}.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,78 +26,6 @@ logging.basicConfig(
 )
 
 
-def loss_fn(
-    pred_kv,
-    base_kv,
-    loss_func: Union[str, list[str]] = "all",
-    top_k: int = 0,
-) -> dict:
-
-    if loss_func == "all":
-        loss_func = SURPORTED_LOSS_FUNC
-    loss = {idx:[] for idx in loss_func}
-    if "fro" in loss_func:          # Frobenius norm, compare every element in the matrix
-        loss["fro"] = torch.norm(pred_kv - base_kv, p='fro').item()
-    if "nuclear" in loss_func:    # nuclear norm, sum of the singular values of the matrix
-        loss["nuclear"] = torch.norm((pred_kv - base_kv).squeeze(dim=0), p='nuc').item()
-    # if "mse" in loss_func:
-    #     loss["mse"] = torch.nn.MSELoss(pred_kv, base_kv).item()
-    # if  "l1" in loss_func or  "mae" in loss_func:
-    #     loss["mae"] = torch.nn.L1Loss(pred_kv, base_kv).item()
-    # if "cos" in loss_func:    # cosine similarity,use when the matrix can be seen as vectors
-    #     loss["cos"] = torch.nn.CosineSimilarity(pred_kv, base_kv).item()
-    # if "kl" in loss_func:     # Kullback-Leibler divergence
-    #     loss["kl"] = torch.nn.KLDivLoss(pred_kv, base_kv).item()
-    if "svd" in loss_func:    # Singular Value Decomposition
-        u1, s1, v1 = torch.svd(pred_kv)
-        u2, s2, v2 = torch.svd(base_kv)
-        if top_k == 0:
-            loss["svd"] = torch.norm(s1 - s2, p='fro').item()
-        else:
-            logging.debug(f"s.shape : {s1.shape}")
-            loss["svd"] = torch.norm(s1[:top_k] - s2[:top_k], p='fro').item()
-    return loss
-
-class KV_Pred_losses:
-    def __init__(
-        self,
-        num_layers: int,
-        loss_func: Union[str, list[str]] = "all",
-    ):
-        self.num_layers = num_layers
-        if isinstance(loss_func, str):
-            loss_func = [loss_func]
-        self.loss_func = loss_func
-        self.losses = {idx: [[],[]] for idx in self.loss_func}
-    
-    def reset(
-        self,
-    ):
-        self.losses = [{idx: [] for idx in self.loss_func} * 2]
-    
-    def update(
-        self,
-        losses: dict[list],  # [k_loss, v_loss]
-    ):
-        for i in range(self.num_layers):
-            for func in self.loss_func:
-                self.losses[func][0].append(losses[func][0][i])
-                self.losses[func][1].append(losses[func][1][i])
-    
-    def get_loss(
-        self,
-        mode: str = "avg",
-    ):
-        avg_loss = {idx: [[],[]] for idx in self.loss_func}
-        if mode == "sum":
-            return self.losses
-        # avg mode default
-        for i in range(self.num_layers):
-            for func in self.loss_func:
-                avg_loss[func][0].append(self.losses[func][0][i] / self.num_layers)
-                avg_loss[func][1].append(self.losses[func][1][i] / self.num_layers)
-        return avg_loss
-
 def main(
     args: Union[None, Optional[dict]] = None
 ):
@@ -108,18 +35,14 @@ def main(
     base_tokenizer = AutoTokenizer.from_pretrained(args["base_name"])
     aux = AutoModelForCausalLM.from_pretrained(args["aux_name"])
     base = AutoModelForCausalLM.from_pretrained(args["base_name"])
-    dataset = load_dataset(args["dataset"])
+    aux_tokenizer.pad_token = aux_tokenizer.eos_token
+    base_tokenizer.pad_token = base_tokenizer.eos_token
     
+    dataset = loading_dataset(args["dataset"])
+    dataloader = DataLoader(dataset, batch_size=args["batch_size"], shuffle=args["shuffle"], collate_fn=collote_fn)
     # logging.info(f"aux.config : {aux.config}")
     # logging.info(f"base.config : {base.config}")
     
-    if args["batch_size"] > 0:
-        dataset = batching(
-            dataset=dataset,
-            batch_size=args["batch_size"],
-            shuffle=args["shuffle"],
-            seed=args["seed"],
-        )
         
     aux_weights = get_model_weights(aux, ["k_proj", "v_proj", "embed"])
     base_weights = get_model_weights(base, ["k_proj", "v_proj", "embed"])
@@ -133,7 +56,7 @@ def main(
     
     assert len(aux_weights["embed"]) == 1 and len(base_weights["embed"]) == 1, "aux or base model's embeddings length is not 1"
     
-    aux_weights["k_proj"] = get_Pseudoinverse(aux_weights["k_proj"])
+    aux_weights["k_proj"] = get_Pseudoinverse(aux_weights["k_proj"])        #  round 1e-4 with torch.dist(torch.pinverse @ matrix, torch.eye)
     aux_weights["v_proj"] = get_Pseudoinverse(aux_weights["v_proj"])
     
     aux_layers = len(aux_weights["k_proj"])
@@ -144,21 +67,15 @@ def main(
     timer.create_timer()
     
     assert aux_layers == base_layers, "aux and base model's layers are not the same"
-    
-    for idx, request in enumerate(dataset):
+    idx = 0
+    for batched_data in tqdm(dataloader):
         timer.start()
-        aux_request = aux_tokenizer(request["question"], return_tensors="pt")
-        base_request = base_tokenizer(request["question"], return_tensors="pt")
+        aux_request = aux_tokenizer(batched_data["question"], return_tensors="pt", padding=True, truncation=True)
+        base_request = base_tokenizer(batched_data["question"], return_tensors="pt", padding=True, truncation=True)
         
         # TODO(zihao): align the input_ids and attention_mask more properly(simply drop the prefix now,Begining of the Sentence included, maybe hurt the performance)
-        if aux_request['input_ids'].shape[1] < base_request['input_ids'].shape[1]:
-            prefix_drop = base_request['input_ids'].shape[1] - aux_request['input_ids'].shape[1]
-            base_request['input_ids'] = base_request['input_ids'][:, :-prefix_drop]
-            base_request['attention_mask'] = base_request['attention_mask'][:, :-prefix_drop]
-        elif aux_request['input_ids'].shape[1] > base_request['input_ids'].shape[1]:
-            prefix_drop = aux_request['input_ids'].shape[1] - base_request['input_ids'].shape[1]
-            aux_request['input_ids'] = aux_request['input_ids'][:, :-prefix_drop]
-            aux_request['attention_mask'] = aux_request['attention_mask'][:, :-prefix_drop]
+        # align the requests
+        aux_request, base_request = align_requests(aux_request, base_request, aux_tokenizer, base_tokenizer, "cpu", "cpu", use_pad=args["use_pad"])
         
         logging.debug(f"aux_request : {aux_tokenizer.decode(aux_request['input_ids'][0])}")
         logging.debug(f"base_request : {base_tokenizer.decode(base_request['input_ids'][0])}")
@@ -201,8 +118,10 @@ def main(
         
         if idx % 200 == 0 or idx == len(dataset) - 1 :
             temp_loss = losses.get_loss(mode="avg")
-            logging.info(f"request\t :\t {idx} \nloss func\t :\t {args['loss_func']} \ntime cost\t :\t {timer.get_time(mode='avg')}")
+            logging.info(f"request\t :\t {idx} \nloss func\t :\t {args['loss_func']} \ntime cost\t :\t {timer.get_time(mode='avg')} seconds")
             logging.info(f"losses\t :\n{json.dumps(temp_loss, indent=4)}")
+        
+        idx += 1
         
     logging.info(f"total time cost\t :\t {timer.get_time(mode='sum')}")
     final_loss = losses.get_loss(mode='avg')
@@ -215,8 +134,9 @@ if __name__ == "__main__":
         "aux_name": "meta-llama/Llama-3.1-8B-Instruct",
         "base_name": "meta-llama/Llama-2-7b-hf",
         "dataset": "/datasets/mandarjoshi/trivia_qa/rc.nocontext/rc_nocontext_validation.json",
-        "batch_size": 0,
-        "shuffle": False,
+        "use_pad": True,
+        "batch_size": 1,
+        "shuffle": True,
         "seed": 42,
         "loss_func": "all",
     }

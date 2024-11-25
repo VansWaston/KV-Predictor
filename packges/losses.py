@@ -41,7 +41,7 @@ class KV_Pred_losses:
     def __init__(
         self,
         num_layers: int,
-        loss_func: Union[str, list[str]] = "all",
+        loss_func: Union[str, list[str]] = "norm",
     ):
         self.num_layers = num_layers
         if isinstance(loss_func, str):
@@ -76,3 +76,33 @@ class KV_Pred_losses:
                 avg_loss[func][0].append(self.losses[func][0][i] / self.num_layers)
                 avg_loss[func][1].append(self.losses[func][1][i] / self.num_layers)
         return avg_loss
+
+
+class CustomLoss(torch.nn.Module):
+    def __init__(self):
+        super(CustomLoss, self).__init__()
+        self.loss_fn = torch.nn.CrossEntropyLoss()
+
+    def forward(self, model_output, targets):
+        num_layers = len(model_output)
+        output1, output2 = model_output[0]
+        target1, target2 = targets[0]
+
+        # 计算每个输出与目标之间的MSE
+        loss1 = self.loss_fn(output1, target1)
+        loss2 = self.loss_fn(output2, target2)
+
+        # 将两个损失相加
+        total_loss = loss1 + loss2
+        
+        for i in range(1,num_layers):
+            output1, output2 = model_output[i]
+            target1, target2 = targets[i]
+
+            # 计算每个输出与目标之间的loss
+            loss1 = self.loss_fn(output1, target1)
+            loss2 = self.loss_fn(output2, target2)
+
+            # 将两个损失相加
+            total_loss += loss1 + loss2
+        return total_loss

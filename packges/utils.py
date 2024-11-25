@@ -192,3 +192,27 @@ class Timers:
             return sum(self.time[name])
         # average mode default
         return sum(self.time[name]) / len(self.time[name])
+    
+class constants():
+    def __init__(self):
+        self.names = []
+        self.values = {}
+        
+    def register(self, name, value = None):
+        self.names.append(name)
+        if value is not None:
+            self.values[name] = [value]
+        else:
+            self.values[name] = []
+
+    def update(self, name, value):
+        if name in self.names:
+            self.values[name].append(value)
+        else:
+            self.register(name, value)
+    
+    def report(self, name, mode = "avg"):
+        if mode == "sum":
+            return sum(self.values[name])
+        else:
+            return sum(self.values[name]) / len(self.values[name])

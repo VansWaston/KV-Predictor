@@ -33,7 +33,7 @@ class loading_dataset(Dataset):
         data_file, 
         query_prompt = f"Answer the question directly within 5 words. Do NOT repeat the question or output any other words. Question:\n",
         use_prompt : bool = False,
-    ):
+    ) -> dict:
         Data = {}
         raw_data = self.load_raw_dataset(data_file, return_type="Dict")
         # adjust the format of the data

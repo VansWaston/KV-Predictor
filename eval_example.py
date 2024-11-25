@@ -44,8 +44,8 @@ def main(
     
     aux_tokenizer = AutoTokenizer.from_pretrained(args["aux_name"])
     base_tokenizer = AutoTokenizer.from_pretrained(args["base_name"])
-    aux = AutoModelForCausalLM.from_pretrained(args["aux_name"]).to(device[0])
-    base = AutoModelForCausalLM.from_pretrained(args["base_name"]).to(device[1])
+    aux = AutoModelForCausalLM.from_pretrained(args["aux_name"], device_map=device[0])
+    base = AutoModelForCausalLM.from_pretrained(args["base_name"], device_map=device[1])
     aux.eval()
     base.eval()
     aux_tokenizer.pad_token = aux_tokenizer.eos_token
@@ -90,6 +90,7 @@ def main(
         base_refs = base_tokenizer.batch_decode(base_refs["input_ids"], skip_special_tokens=True)
         
         # align the requests
+        logging.debug(f"token length is {'' if  ['input_ids'].shape[1]==base_request['input_ids'].shape[1] else 'not'} the same, using aligning...")
         aux_request, base_request = align_requests(aux_request, base_request, aux_tokenizer, base_tokenizer, device[0], device[1], use_pad=args["use_pad"])
         
         logging.debug(f"aux_request['input_ids'].length after adjusting : {aux_request['input_ids'].shape}")
@@ -173,18 +174,18 @@ if __name__ == "__main__":
         "aux_name": "meta-llama/Llama-3.1-8B-Instruct",
         "base_name": "meta-llama/Llama-2-7b-hf",
         "dataset": "/datasets/mandarjoshi/trivia_qa/rc.nocontext/rc_nocontext_validation.json",
-        "batch_size": 16,
+        "batch_size": 1,
         "shuffle": True,
         "seed": 42,
         "loss_func": "all",
         "mode": "validation",
         "device": "cpu",
         "max_length": None,
-        "max_new_tokens": 6,
+        "max_new_tokens": 5,
         "use_prompt": True,
         "repetition_penalty": 1,
         "use_predicted_key_value": False,
-        "use_pad": True,
+        "use_pad": False,
         "tokenizer_padding": True,
         "tokenizer_truncation": True,
         "tokenizer_padding_side": "left",

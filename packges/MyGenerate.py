@@ -101,10 +101,11 @@ def mygenerate(
     
     outputs = model.generate(
         inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
         generation_config=generationconfig,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
-        # **model_kwargs,
+        **model_kwargs,
     )
     
     pred_ids = outputs.sequences[:,inputs["input_ids"].shape[1]:] if return_dict_in_generate else outputs[:,inputs["input_ids"].shape[1]:]

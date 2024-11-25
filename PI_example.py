@@ -65,6 +65,7 @@ def main(
     losses = KV_Pred_losses(aux_layers, args["loss_func"])
     timer = Timers("request")
     timer.create_timer()
+    records = []
     
     assert aux_layers == base_layers, "aux and base model's layers are not the same"
     idx = 0
@@ -89,6 +90,8 @@ def main(
         
         aux_kv = permute_kv(aux_kv)
         base_kv = permute_kv(base_kv)
+        
+        record = [aux_kv, base_kv]
         
         logging.debug(f"aux_kv shape: {aux_kv[0][0].shape}")     # [batch_size, num_heads, num_tokens, head_dim]
         logging.debug(f"base_kv shape: {base_kv[0][0].shape}")   # to [batch_size, num_tokens, num_heads * head_dim]
@@ -116,10 +119,15 @@ def main(
         timer.end()
         losses.update(loss)
         
+        record_serializable = [[[k.tolist(), v.tolist()] for k, v in record[0]], [[k.tolist(), v.tolist()] for k, v in record[1]]]
+        records.append(len(json.dumps(record_serializable, indent=4).encode("utf-8")) / 1024 / 1024)
+        
         if idx % 200 == 0 or idx == len(dataset) - 1 :
             temp_loss = losses.get_loss(mode="avg")
-            logging.info(f"request\t :\t {idx} \nloss func\t :\t {args['loss_func']} \ntime cost\t :\t {timer.get_time(mode='avg')} seconds")
-            logging.info(f"losses\t :\n{json.dumps(temp_loss, indent=4)}")
+            
+            logging.info(f"request batch\t :\t {idx} \nloss func\t :\t {args['loss_func']} \ntime cost\t :\t {timer.get_time(mode='avg')} seconds")
+            # logging.info(f"losses\t :\n{json.dumps(temp_loss, indent=4)}")
+            logging.info(f"KV file memory usage\t :\t {sum(records)/len(records)} MB")
         
         idx += 1
         
@@ -127,7 +135,7 @@ def main(
     final_loss = losses.get_loss(mode='avg')
     for func in args["loss_func"]:
         logging.info(f"total loss\t :\n{func} \nk_loss : {sum(final_loss[func][0])/len(final_loss[func][0])} \nv_loss : {sum(final_loss[func][1])/len(final_loss[func][1])}")
-            
+
 
 if __name__ == "__main__":
     args = {

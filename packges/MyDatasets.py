@@ -31,7 +31,7 @@ class loading_dataset(Dataset):
     def load_data(
         self, 
         data_file, 
-        query_prompt = f"Answer the question directly within 5 words. Do NOT repeat the question or output any other words. Question:\n",
+        query_prompt = f"[INST] Answer the question directly within 5 words. Do NOT repeat the question or output any other words. Question: [/INST] ",
         use_prompt : bool = False,
     ) -> dict:
         Data = {}
@@ -102,29 +102,34 @@ class datasets():
         else:
             self.file_name = [file_name]
         
-        if mode == None:
-            self.mode = ['train', 'validation', 'test']
-        else:
+        if isinstance(mode, str):
             self.mode = mode
+        else:
+            self.mode = ['train', 'validation', 'test']
             
-        self.data = self.read_data()
+        self.data, loaded = self.read_data()
         self.save_dir = save_dir
         
-        logging.info(f"Loaded {len(self.file_name)} {file_type}_typed files from {dir}")
+        logging.info(f"Searched {len(self.file_name)} {file_type}_typed files from {dir}.Loaded {loaded} ones.")
         
     def read_data(self):
         data = pd.DataFrame()
+        loaded = 0
         for file in self.file_name:
             if self.file_type == 'parquet' and self.mode in file:
                 table = pq.read_table(os.path.join(self.dir, file)).to_pandas()
                 data = pd.concat([data, table], ignore_index=True)
+                logging.info(f"Loaded {file}")
+                loaded += 1
             elif self.file_type == 'csv' and self.mode in file:
                 table = pd.read_csv(os.path.join(self.dir, file))
                 data = pd.concat([data, table], ignore_index=True)
+                logging.info(f"Loaded {file}")
+                loaded += 1
             else:
                 pass
-            logging.info(f"Loaded {file}")
-        return data
+            
+        return data, loaded
     
     def __len__(self):
         return len(self.data)
@@ -191,8 +196,9 @@ def batching(
 def collote_fn(batch_samples):
     batch_inputs, batch_targets = [], []
     batched_data = {}
+    query_prompt = f"\n\nAnswer the question within 5 words. Do NOT repeat the question. Do NOT output any other words. Question: "
     for sample in batch_samples:
-        batch_inputs.append(sample['question'])
+        batch_inputs.append(query_prompt + sample['question'])
         batch_targets.append(sample['answer'])
     batched_data['question'] = batch_inputs
     batched_data['answer'] = batch_targets
@@ -200,23 +206,16 @@ def collote_fn(batch_samples):
 
 
 if __name__ == "__main__":
-    data = loading_dataset("/datasets/mandarjoshi/trivia_qa/rc.nocontext/rc_nocontext_validation.json")
-    valid_dataloader = DataLoader(data, batch_size=16, shuffle=False, collate_fn=collote_fn)
-    batch = next(iter(valid_dataloader))
-    logging.debug(f"batch.keys : {batch.keys()}")
-    logging.debug(f"batch : {batch}")
-
-# if __name__ == "__main__":
-#     folder = 'rc.nocontext'
-#     dir = f'/datasets/mandarjoshi/trivia_qa'
-#     file_type = 'parquet'
-#     mode = 'validation'
-#     save_dir = dir
+    folder = 'rc.nocontext'
+    dir = f'/datasets/mandarjoshi/trivia_qa'
+    file_type = 'parquet'
+    mode = 'train'
+    save_dir = dir
     
-#     data = datasets(f"{dir}/{folder}", file_type, save_dir=save_dir, mode=mode)
+    data = datasets(f"{dir}/{folder}", file_type, save_dir=save_dir, mode=mode)
     
-#     data.delete(columns=['question_id','question_source','entity_pages','search_results'])
+    data.delete(columns=['question_id','question_source','entity_pages','search_results'])
     
-#     print(data.data.head())
-#     data.save_json(f"{dir}/{folder}/{folder.replace('.','_')}_{mode}.json", lines=True, indent=0)
-#     # batched = batching(np.array(data.data).tolist(), 3, shuffle=True, seed=42)
+    print(data.data.head())
+    data.save_json(f"{dir}/{folder}/{folder.replace('.','_')}_{mode}.json", lines=True, indent=0)
+    # batched = batching(np.array(data.data).tolist(), 3, shuffle=True, seed=42)

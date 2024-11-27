@@ -8,19 +8,21 @@ from packges.MyDatasets import loading_dataset, collote_fn
 import numpy as np
 import torch
 import pandas as pd
-import json
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from packges.utils import get_model_weights, get_Pseudoinverse, permute_kv, Timers, align_requests
-from packges.losses import KV_Pred_losses, SURPORTED_LOSS_FUNC, loss_fn
-
+import os
+from packges.utils import Timers
 from packges.predictor import KVPredictor
 import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
 from packges.utils import constants
 from packges.losses import CustomLoss
+from rouge import Rouge
+# WandB – Import the wandb library
+import wandb
 
 now = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-handler = RotatingFileHandler(f'/workspace/log/examples/PI_examples_{now}.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
+handler = RotatingFileHandler(f'/workspace/log/examples/train_examples_{now}.log', maxBytes=1000000, backupCount=3)  # 1MB each file, keep 3 files
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -30,134 +32,253 @@ logging.basicConfig(
     ]
 )
 
-
-def main(
-    args: Union[None, Optional[dict]] = None
+def train_one_epoch(
+    epoch: int,
+    model: torch.nn.Module,
+    aux: AutoModelForCausalLM,
+    base: AutoModelForCausalLM,
+    aux_tokenizer: AutoTokenizer,
+    base_tokenizer: AutoTokenizer,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    loss_fn: torch.nn.Module,
 ):
-    assert args is not None, "args is None"
-    
-    aux_tokenizer = AutoTokenizer.from_pretrained(args["aux_name"])
-    base_tokenizer = AutoTokenizer.from_pretrained(args["base_name"])
-    aux = AutoModelForCausalLM.from_pretrained(args["aux_name"], device_map="auto", torch_dtype=torch.bfloat16)
-    base = AutoModelForCausalLM.from_pretrained(args["base_name"], device_map="auto", torch_dtype=torch.bfloat16)
-    aux_tokenizer.pad_token = aux_tokenizer.eos_token
-    base_tokenizer.pad_token = base_tokenizer.eos_token
-    
-    dataset = loading_dataset(args["dataset"])
-    dataloader = DataLoader(dataset, batch_size=args["batch_size"], shuffle=args["shuffle"], collate_fn=collote_fn)
-    
-    logging.debug(f"aux.config : {aux.config}")
-    logging.debug(f"base.config : {base.config}")
-        
-    aux_weights = get_model_weights(aux, ["k_proj", "v_proj", "embed"])
-    base_weights = get_model_weights(base, ["k_proj", "v_proj", "embed"])
-    
-    # for name, param in model_weights.items():
-    #     print(name, param.shape)
-    
-    logging.debug(f"aux_k_proj : {aux_weights['k_proj'][0].shape}")
-    logging.debug(f"base_k_proj : {base_weights['k_proj'][0].shape}")
-    
-    assert len(aux_weights["embed"]) == 1 and len(base_weights["embed"]) == 1, "aux or base model's embeddings length is not 1"
-    
-    # aux_weights["k_proj"] = get_Pseudoinverse(aux_weights["k_proj"])        #  round 1e-4 with torch.dist(torch.pinverse @ matrix, torch.eye)
-    # aux_weights["v_proj"] = get_Pseudoinverse(aux_weights["v_proj"])
-    
-    aux_layers = len(aux_weights["k_proj"])
-    base_layers = len(base_weights["k_proj"])
-    
+    model.train()
     losses = constants()
     losses.register("loss")
+    
     timer = Timers("request")
     timer.create_timer("total")
     timer.create_timer("train")
     timer.create_timer("prepare")
     
-    model = KVPredictor(aux_layers, base_layers, aux.config.num_key_value_heads, base.config.num_key_value_heads, aux.config.head_dim, base.config.head_dim)
-    model.train()
-    model.to(args['device'])
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    loss_fn = CustomLoss()
-    idx = 0
-    for batched_data in tqdm(dataloader):
+    for idx, batched_data in enumerate(dataloader, 0):
         timer.start("total")
         timer.start("prepare")
-        aux_request = aux_tokenizer(batched_data["question"], return_tensors="pt", padding='max_length', truncation=True, max_length=32).to(args['device'])
-        base_request = base_tokenizer(batched_data["question"], return_tensors="pt", padding='max_length', truncation=True, max_length=32).to(args['device'])
+        aux_request = aux_tokenizer(batched_data["question"], return_tensors="pt", padding='max_length', truncation=True, max_length=args['max_lenth'])
+        base_request = base_tokenizer(batched_data["question"], return_tensors="pt", padding='max_length', truncation=True, max_length=args['max_lenth'])
         
-        # TODO(zihao): align the input_ids and attention_mask more properly(simply drop the prefix now,Begining of the Sentence included, maybe hurt the performance)
-        # NOTICE(zihao): can set to pad to max length!
-        # align the requests
-        # aux_request, base_request = align_requests(aux_request, base_request, aux_tokenizer, base_tokenizer, "cpu", "cpu", use_pad=args["use_pad"])
-        
-        aux_output = aux(**aux_request, output_hidden_states=True, output_attentions=True ,use_cache=True)
-        base_output = base(**base_request, output_hidden_states=True, output_attentions=True ,use_cache=True)
+        aux_output = aux(**aux_request, output_attentions=True ,use_cache=True)
+        base_output = base(**base_request, output_attentions=True ,use_cache=True)
         timer.end("prepare")
         
         aux_kv = aux_output.past_key_values
         base_kv = base_output.past_key_values
         
+        logging.debug(f"aux_kv shape: {aux_kv[0][0].shape}")     # [batch_size, num_heads, num_tokens, head_dim]
+        logging.debug(f"base_kv shape: {base_kv[0][0].shape}")   # to [batch_size, num_tokens, num_heads * head_dim]
+        
         # training
         timer.start("train")
         optimizer.zero_grad()  # 清除梯度
-        pred_kv = model(aux_kv)  # 前向传播
+        ins = [(k.to(args['device']), v.to(args['device'])) for k, v in aux_kv]
+        pred_kv = model(ins)  # 前向传播
         
         logging.debug(f"pred_kv shape: {pred_kv[0][0].shape}")
-        logging.debug(f"base_kv shape: {base_kv[0][0].shape}")
 
+        pred_kv = [(k.to(args['device']), v.to(args['device'])) for k, v in pred_kv]
+        base_kv = [(k.to(args['device']), v.to(args['device'])) for k, v in base_kv]
         loss = loss_fn(pred_kv, base_kv)  # 计算损失
         
         logging.debug(f"loss : {loss}")
         loss.backward()  # 反向传播
         optimizer.step()  # 更新参数
         timer.end("train")
-        
-        # record = [aux_kv, base_kv]
-        
-        logging.debug(f"aux_kv shape: {aux_kv[0][0].shape}")     # [batch_size, num_heads, num_tokens, head_dim]
-        logging.debug(f"base_kv shape: {base_kv[0][0].shape}")   # to [batch_size, num_tokens, num_heads * head_dim]
-                        
         timer.end("total")
-        losses.update("loss",loss)
+        losses.update("loss",loss.item())
         
-        # save to json files
-        # HACK(zihao): can save to parquet files for smaller size
-        # record_serializable = [[[k.tolist(), v.tolist()] for k, v in record[0]], [[k.tolist(), v.tolist()] for k, v in record[1]]]
-        # records.append(len(json.dumps(record_serializable, indent=4).encode("utf-8")) / 1024 / 1024)
+        wandb.log({"Training Loss": loss.item()})
+        wandb.log({"Training total time": timer.get_time('total')})
+        wandb.log({"Training train time": timer.get_time('train')})
+        wandb.log({"Training prepare time": timer.get_time('prepare')})
         
-        if idx % 200 == 0 or idx == len(dataloader) - 1 :
-            logging.info(f"batch {idx}\n"
+        if idx % 400 == 0 or idx == len(dataloader) - 1 :
+            logging.info(f"train batch {idx} epoch {epoch}\n"
                          f"---time cost:---\n"
-                         f"total: {timer.get_time('total')}, train: {timer.get_time('train')}, prepare: {timer.get_time('prepare')}\n"
+                         f"total: {timer.get_time('total'):.2f}s, train: {timer.get_time('train'):.2f}s, prepare: {timer.get_time('prepare'):.2f}s\n"
                          f"---loss---\n"
-                         f"loss: {losses.report('loss')}\n"
+                         f"loss: {loss.item()}\n"
                          )
-            
-            # logging.info(f"losses\t :\n{json.dumps(temp_loss, indent=4)}")
-            # logging.info(f"KV file memory usage\t :\t {sum(records)/len(records)} MB")
+    
+    logging.info(
+        f"{epoch} training epochs finished\n"
+        f"total time cost\t :\t {timer.get_time('total', mode='sum'):.2f}\n"
+        f"train time cost\t :\t {timer.get_time('train', mode='sum'):.2f}\n"
+        f"prepare time cost\t :\t {timer.get_time('prepare', mode='sum'):.2f}\n"
+        f"losses\t :\n{losses.report('loss', mode='last')}\n"
+        )
+    
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }, f'/workspace/results/ckpt/predictor_{epoch}_{now}.pth')
+
+def eval_one_epoch(
+    epoch: int,
+    model: torch.nn.Module,
+    aux: AutoModelForCausalLM,
+    base: AutoModelForCausalLM,
+    aux_tokenizer: AutoTokenizer,
+    base_tokenizer: AutoTokenizer,
+    dataloader: DataLoader,
+):
+    model.eval()
+    rouge = Rouge()
+    losses = constants()
+    losses.register("rouge-1")
+    losses.register("rouge-2")
+    losses.register("rouge-l")
+    
+    timer = Timers("request")
+    timer.create_timer("total")
+    timer.create_timer("eval")
+    timer.create_timer("prepare")
+    
+    preds, refs = [], []
+    
+    for idx, batched_data in enumerate(dataloader, 0):
+        timer.start("total")
+        timer.start("prepare")
+        aux_request = aux_tokenizer(batched_data["question"], return_tensors="pt", padding='max_length', truncation=True, max_length=args['max_lenth']).to(args['device'])
+        # NOTICE(zihao): max_length + 1 for base model to reuse the past_key_values
+        base_request = base_tokenizer(batched_data["question"], return_tensors="pt", padding='max_length', truncation=True, max_length=args['max_lenth'] + 1).to(args['device'])
         
-        idx += 1
+        aux_output = aux(**aux_request, use_cache=True)
+        timer.end("prepare")
         
-    logging.info(f"total time cost\t :\t {timer.get_time('total', mode='sum')}\n"
-                 f"train time cost\t :\t {timer.get_time('train', mode='sum')}\n"
-                 f"prepare time cost\t :\t {timer.get_time('prepare', mode='sum')}\n"
-                 f"losses\t :\n{losses.report('loss')}\n"
-                 )
+        aux_kv = aux_output.past_key_values
+
+        # evalidation
+        timer.start("eval")
+        ins = [(k.to(args['device']), v.to(args['device'])) for k, v in aux_kv]
+        with torch.no_grad():
+            pred_kv = model(ins)
+        
+        base_output = base.generate(
+            **base_request,
+            # output_attentions=True,
+            max_new_tokens=8,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9, 
+            top_k=8, 
+            # num_beams=4,  # beam search:会导致hidden_states的shape不一致
+            # early_stopping=True,
+            # no_repeat_ngram_size=2,    # 禁止2-gram重复
+            # past_key_values=pred_kv,
+            use_cache=True,
+            )
+        
+        # Truncate the input question from base_output
+        base_output = base_output[:, base_request['input_ids'].shape[1]:]
+        
+        decoded_preds = base_tokenizer.batch_decode(base_output, skip_special_tokens=True)
+        
+        preds += [''.join(pred.strip()) for pred in decoded_preds]
+        refs += [''.join(ref.strip()) for ref in batched_data["answer"]]
+        
+        print(f"preds : {preds}")
+        print(f"refs : {refs}")
+        
+        scores = rouge.get_scores(hyps=preds, refs=refs, avg=True)
+        result = {key: value['f'] * 100 for key, value in scores.items()}
+        result['avg'] = np.mean(list(result.values()))
+        
+        logging.debug(f"Rouge-1: {result['rouge-1']:>0.2f} Rouge-2: {result['rouge-2']:>0.2f} Rouge-L: {result['rouge-l']:>0.2f}\n")
+        timer.end("eval")      
+        timer.end("total")
+        losses.update("rouge-1",result['rouge-1'])
+        losses.update("rouge-2",result['rouge-2'])
+        losses.update("rouge-l",result['rouge-l'])
+        
+        wandb.log({"time": timer.get_time('total')})
+        wandb.log({"Rouge-1": result['rouge-1']})
+        wandb.log({"Rouge-2": result['rouge-2']})
+        wandb.log({"Rouge-L": result['rouge-l']})
+        
+        if idx % 20 == 0 or idx == len(dataloader) - 1 :
+            logging.info(f"eval batch {idx} epoch {epoch}\n"
+                         f"---time cost:---\n"
+                         f"total: {timer.get_time('total'):.2f}s, train: {timer.get_time('eval'):.2f}s, prepare: {timer.get_time('prepare'):.2f}s\n"
+                         f"---loss---\n"
+                         f"rouge-1: {losses.report('rouge-1')}\n"
+                         f"rouge-2: {losses.report('rouge-2')}\n"
+                         f"rouge-l: {losses.report('rouge-l')}\n"
+                         )
+    
+    logging.info(
+        f"{epoch} eval epochs finished\n"
+        f"total time cost\t :\t {timer.get_time('total', mode='sum'):.2f}\n"
+        f"train time cost\t :\t {timer.get_time('eval', mode='sum'):.2f}\n"
+        f"prepare time cost\t :\t {timer.get_time('prepare', mode='sum'):.2f}\n"
+        f"rouge-1 loss: {losses.report('rouge-1')}\n"
+        f"rouge-2 loss: {losses.report('rouge-2')}\n"
+        f"rouge-l loss: {losses.report('rouge-l')}\n"
+        )
+
+def main(
+    args: Union[None, Optional[dict]] = None
+):
+    assert args is not None, "args is None"
+    wandb.init(project=args['wandb_project'])
+    
+    aux_tokenizer = AutoTokenizer.from_pretrained(args["aux_name"])
+    base_tokenizer = AutoTokenizer.from_pretrained(args["base_name"])
+    aux_tokenizer.pad_token = aux_tokenizer.eos_token
+    base_tokenizer.pad_token = base_tokenizer.eos_token
+    aux_tokenizer.padding_side = "left"
+    base_tokenizer.padding_side = "left"
+    
+    aux = AutoModelForCausalLM.from_pretrained(args["aux_name"], device_map="balanced_low_0", torch_dtype=torch.bfloat16)
+    base = AutoModelForCausalLM.from_pretrained(args["base_name"], device_map="balanced_low_0", torch_dtype=torch.bfloat16)
+    
+    train_dataset = loading_dataset(args["train_dataset"])
+    eval_dataset = loading_dataset(args["eval_dataset"])
+    train_dataloader = DataLoader(train_dataset, batch_size=args["train_batch_size"], shuffle=args["shuffle"], collate_fn=collote_fn)
+    eval_dataloader = DataLoader(eval_dataset, batch_size=args["eval_batch_size"], shuffle=args["shuffle"], collate_fn=collote_fn)
+    
+    logging.debug(f"aux.config : {aux.config}")
+    logging.debug(f"base.config : {base.config}")
+    
+    aux_layers = aux.config.num_hidden_layers
+    base_layers = base.config.num_hidden_layers
+
+    model = KVPredictor(aux_layers, base_layers, aux.config.num_attention_heads, base.config.num_attention_heads, aux.config.hidden_size // aux.config.num_attention_heads, base.config.hidden_size // base.config.num_attention_heads)
+    model.to(args['device']).bfloat16()
+    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    scheduler = StepLR(optimizer, step_size=5, gamma=0.5)
+    if os.path.isfile(args["resume"]):
+        checkpoint = torch.load(args["resume"])
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        logging.info(f"resume from {args['resume']}")
+    loss_fn = CustomLoss(base_layers)
+    
+    for epoch in range(args["epochs"]):
+        # logging.info("Start training")
+        # train_one_epoch(epoch, model, aux, base, aux_tokenizer, base_tokenizer, train_dataloader, optimizer, loss_fn)
+        logging.info("Start evaluating")
+        eval_one_epoch(epoch, model, aux, base, aux_tokenizer, base_tokenizer, eval_dataloader)
+        scheduler.step()
 
 
 if __name__ == "__main__":
     args = {
-        "aux_name": "meta-llama/Llama-3.1-8B-Instruct",
-        "base_name": "meta-llama/Llama-2-7b-hf",
-        "dataset": "/datasets/mandarjoshi/trivia_qa/rc.nocontext/rc_nocontext_validation.json",
-        "use_pad": True,
-        "batch_size": 16,
+        "wandb_project": "kv-predictor",
+        "aux_name": "facebook/opt-125m",
+        "base_name": "facebook/opt-2.7b",
+        "train_dataset": "/datasets/mandarjoshi/trivia_qa/rc.nocontext/rc_nocontext_train.json",
+        "eval_dataset": "/datasets/mandarjoshi/trivia_qa/rc.nocontext/rc_nocontext_validation.json",
+        "epochs":20,
+        'max_lenth': 64,
+        "train_batch_size": 80,
+        "eval_batch_size": 32,
         "shuffle": True,
         "seed": 42,
-        "device": "cuda",
-        "loss_func": "all",
+        "resume": "/workspace/results/ckpt/predictor_0_2024-11-26-09-17-05.pth",
+        "device": "cuda:0",
+        "loss_func": "MSELoss",
     }
-    if args["loss_func"] == "all":
-        args["loss_func"] = SURPORTED_LOSS_FUNC
+
     logging.info(f"args : \n{args}")
     main(args)

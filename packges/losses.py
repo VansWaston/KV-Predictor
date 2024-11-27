@@ -79,12 +79,12 @@ class KV_Pred_losses:
 
 
 class CustomLoss(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, num_layers):
         super(CustomLoss, self).__init__()
-        self.loss_fn = torch.nn.CrossEntropyLoss()
-
+        self.loss_fn = torch.nn.MSELoss()
+        self.num_layers = num_layers
+        
     def forward(self, model_output, targets):
-        num_layers = len(model_output)
         output1, output2 = model_output[0]
         target1, target2 = targets[0]
 
@@ -95,7 +95,7 @@ class CustomLoss(torch.nn.Module):
         # 将两个损失相加
         total_loss = loss1 + loss2
         
-        for i in range(1,num_layers):
+        for i in range(1,self.num_layers):
             output1, output2 = model_output[i]
             target1, target2 = targets[i]
 

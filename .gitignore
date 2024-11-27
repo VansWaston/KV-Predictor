@@ -9,6 +9,7 @@ results
 LMCache
 CacheBlend
 __pycache__
+wandb
 
 # unignore files
 !README.md

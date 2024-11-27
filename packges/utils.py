@@ -214,5 +214,7 @@ class constants():
     def report(self, name, mode = "avg"):
         if mode == "sum":
             return sum(self.values[name])
+        elif mode == "last":
+            return self.values[name][-1]
         else:
             return sum(self.values[name]) / len(self.values[name])

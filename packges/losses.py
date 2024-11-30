@@ -79,26 +79,57 @@ class KV_Pred_losses:
 
 
 class CustomLoss(torch.nn.Module):
-    def __init__(self, num_layers):
+    def __init__(self, num_layers, rank = -1):
         super(CustomLoss, self).__init__()
         self.loss_fn = torch.nn.MSELoss()
         self.num_layers = num_layers
+        if rank == 0:
+            self.rank = -1
+        else:
+            self.rank = rank
         
-    def forward(self, model_output, targets):
-        output1, output2 = model_output[0]
-        target1, target2 = targets[0]
+    def svd_regularization(self, output, target):
+        """
+        使用SVD对输出和目标进行正则化。
+        :param output: 模型输出
+        :param target: 目标
+        :return: 使用修改后的SVD重构后的输出和目标
+        """
+        # 将output1，output2，target1，target2的形状变为[bsz, seq_len, dim*num_heads]
 
-        # 计算每个输出与目标之间的MSE
-        loss1 = self.loss_fn(output1, target1)
-        loss2 = self.loss_fn(output2, target2)
-
-        # 将两个损失相加
-        total_loss = loss1 + loss2
+        bsz, num_heads, seq_len, dim = output.shape
+        output = output.permute(0, 2, 1, 3).reshape(bsz, seq_len, dim * num_heads).to(torch.float32)
+        target = target.permute(0, 2, 1, 3).reshape(bsz, seq_len, dim * num_heads).to(torch.float32)
         
-        for i in range(1,self.num_layers):
-            output1, output2 = model_output[i]
+        # 使用SVD分解output和target
+        u_o, s_o, v_o = torch.svd(output)
+        u_t, s_t, v_t = torch.svd(target)
+        
+        # 保留最大的rank个奇异值
+        s_o = s_o[:,:self.rank].to(torch.bfloat16)
+        s_t = s_t[:,:self.rank].to(torch.bfloat16)
+        u_o = u_o[:, :, :self.rank].to(torch.bfloat16)
+        v_o = v_o[:, :, :self.rank].to(torch.bfloat16)
+        u_t = u_t[:, :, :self.rank].to(torch.bfloat16)
+        v_t = v_t[:, :, :self.rank].to(torch.bfloat16)
+        
+        # 构造新的output和target矩阵
+        output_reconstructed = torch.matmul(u_o, torch.matmul(torch.diag_embed(s_o), v_o.transpose(-2, -1)))
+        target_reconstructed = torch.matmul(u_t, torch.matmul(torch.diag_embed(s_t), v_t.transpose(-2, -1)))
+        
+        return output_reconstructed, target_reconstructed
+    
+    def forward(self, model_output, targets, use_svd = False):
+        total_loss = 0
+        
+        for i in range(self.num_layers):
+            output1, output2 = model_output[i]  # [bsz, num_heads, seq_len, dim]
             target1, target2 = targets[i]
-
+            
+            if use_svd:
+                output1, target1 = self.svd_regularization(output1, target1)
+                output2, target2 = self.svd_regularization(output2, target2)
+            
             # 计算每个输出与目标之间的loss
             loss1 = self.loss_fn(output1, target1)
             loss2 = self.loss_fn(output2, target2)

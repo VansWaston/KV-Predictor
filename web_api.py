@@ -14,7 +14,7 @@ st.title("💬 Qwen2.5 Chatbot")
 st.caption("🚀 A streamlit chatbot powered by Self-LLM")
 
 # 定义模型路径
-mode_name_or_path = 'qwen/Qwen2.5-7B-Instruct'
+mode_name_or_path = 'facebook/opt-2.7b'
 
 # 定义一个函数，用于获取模型和 tokenizer
 @st.cache_resource

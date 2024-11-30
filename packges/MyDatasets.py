@@ -34,23 +34,29 @@ class loading_dataset(Dataset):
         query_prompt = f"[INST] Answer the question directly within 5 words. Do NOT repeat the question or output any other words. Question: [/INST] ",
         use_prompt : bool = False,
     ) -> dict:
-        Data = {}
+        Data = []
+        skipped = 0
         raw_data = self.load_raw_dataset(data_file, return_type="Dict")
         # adjust the format of the data
+        indices = np.zeros(len(raw_data), dtype=int)
         if self.max_dataset_size is not None:
-            for idx, record in enumerate(raw_data):
-                if idx >= self.max_dataset_size:
-                    break
-                Data[idx] = {
-                        'question': (query_prompt if use_prompt else "") + record["question"],
-                        'answer': record["answer"]["value"],
-                    }
+            indices[:self.max_dataset_size] = 1
+            np.random.shuffle(indices)
         else:
-            for idx, record in enumerate(raw_data):
-                Data[idx] = {
-                        'question': (query_prompt if use_prompt else "") + record["question"],
-                        'answer': record["answer"]["normalized_value"],
-                    }
+            indices[:] = 1
+        for idx, record in enumerate(raw_data):
+            if indices[idx] == 0:
+                continue
+            if record["answer"]["value"] == "" or record["question"] == "":
+                skipped += 1
+                continue
+            Data.append({
+                    'question': (query_prompt if use_prompt else "") + record["question"],
+                    'answer': record["answer"]["value"],
+                })
+        
+        if skipped > 0:
+            logging.warning(f"Skipped {skipped} records with empty question or answer")
         
         return Data
     
@@ -58,6 +64,8 @@ class loading_dataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
+        if isinstance(idx, (list, np.ndarray)):
+            return [self.data[i] for i in idx]
         return self.data[idx]
     
     def load_raw_dataset(self, file_path, return_type="Dict"):
@@ -196,9 +204,9 @@ def batching(
 def collote_fn(batch_samples):
     batch_inputs, batch_targets = [], []
     batched_data = {}
-    query_prompt = f"\n\nAnswer the question within 5 words. Do NOT repeat the question. Do NOT output any other words. Question: "
+    query_prompt = f"Answer the question within 5 words. Do NOT repeat the question. Do NOT output any other words. Question: "
     for sample in batch_samples:
-        batch_inputs.append(query_prompt + sample['question'])
+        batch_inputs.append(query_prompt + sample['question'] + "?\nAnswer:")
         batch_targets.append(sample['answer'])
     batched_data['question'] = batch_inputs
     batched_data['answer'] = batch_targets

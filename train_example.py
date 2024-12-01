@@ -213,6 +213,11 @@ def eval_one_epoch(
         pred_result = {key: value['f'] * 100 for key, value in pred_scores.items()}
         pred_result['avg'] = np.mean(list(pred_result.values()))
         
+        # Remove empty strings from outputs and corresponding refs
+        non_empty_indices = [i for i, output in enumerate(outputs) if output]
+        outputs = [outputs[i] for i in non_empty_indices]
+        refs = [refs[i] for i in non_empty_indices]
+        
         output_scores = rouge.get_scores(hyps=outputs, refs=refs, avg=True)
         output_result = {key: value['f'] * 100 for key, value in output_scores.items()}
         output_result['avg'] = np.mean(list(output_result.values()))
@@ -279,7 +284,7 @@ def main(
     aux = AutoModelForCausalLM.from_pretrained(args["aux_name"], device_map="balanced_low_0", torch_dtype=getattr(torch, args['dtype'], torch.float32))
     base = AutoModelForCausalLM.from_pretrained(args["base_name"], device_map="balanced_low_0", torch_dtype=getattr(torch, args['dtype'], torch.float32))
     
-    train_dataset = loading_dataset(args["train_dataset"], max_dataset_size=27496*2)  #
+    train_dataset = loading_dataset(args["train_dataset"], max_dataset_size=27496)  #
     eval_dataset = loading_dataset(args["eval_dataset"])
     # train_sampler = torch.utils.data.BatchSampler(torch.utils.data.RandomSampler(train_dataset), batch_size=args["train_batch_size"], drop_last=True)
     train_dataloader = DataLoader(train_dataset, batch_size=args["train_batch_size"], shuffle=args["shuffle"], collate_fn=collote_fn)   # sampler=train_sampler
